@@ -6,6 +6,7 @@
 package com.signomix.client;
 
 import java.io.BufferedReader;
+import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
 import java.io.InputStream;
@@ -35,6 +36,8 @@ import org.apache.http.NameValuePair;
 import org.apache.http.client.HttpClient;
 import org.apache.http.client.entity.UrlEncodedFormEntity;
 import org.apache.http.client.methods.HttpPost;
+import org.apache.http.entity.ContentType;
+import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.HttpClientBuilder;
 import org.apache.http.message.BasicNameValuePair;
 
@@ -50,15 +53,17 @@ public class RestClient {
         String deviceEUI = null;
         String authKey = null;
         int interval = 0;
+        String provider = "";
         RestClient restClient = new RestClient();
 
         // create Options object
         Options options = new Options();
         options.addOption("u", "url", true, "Signomix service URL");
-        options.addOption("f", "file", true, "CSV file location");
+        options.addOption("f", "file", true, "data file location");
         options.addOption("e", "eui", true, "device EUI");
         options.addOption("a", "auth", true, "device authorization key");
         options.addOption("i", "interval", true, "interval between transmissions");
+        options.addOption("p", "provider", true, "provider type: {rest,ttn} (rest is default)");
         CommandLineParser parser = new DefaultParser();
         try {
             CommandLine cmd = parser.parse(options, args);
@@ -66,11 +71,12 @@ public class RestClient {
             fileLocation = cmd.getOptionValue("f");
             deviceEUI = cmd.getOptionValue("e");
             authKey = cmd.getOptionValue("a");
+            provider = cmd.getOptionValue("p");
             try {
                 interval = Integer.parseInt(cmd.getOptionValue("i"));
             } catch (NumberFormatException | NullPointerException e) {
             }
-            if (null == url || null == authKey || null == deviceEUI || null == fileLocation) {
+            if (null == url || null == authKey || null == fileLocation) {
                 restClient.printHelp(options);
                 System.exit(2);
             }
@@ -78,17 +84,29 @@ public class RestClient {
             Logger.getLogger(RestClient.class.getName()).log(Level.SEVERE, null, ex);
             System.exit(1);
         }
-        restClient.run(url, authKey, deviceEUI, fileLocation, interval);
-    }
 
-    private void run(String url, String authKey, String deviceEUI, String fileLocation, int interval) {
-        //HttpClient client;
-        System.out.println("SignomixClient " + getVersionName());
+        System.out.println("SignomixClient " + restClient.getVersionName());
         System.out.println("URL:" + url);
         System.out.println("FILE:" + fileLocation);
         System.out.println("EUI:" + deviceEUI);
         System.out.println("AUTH:" + authKey);
-        System.out.println("INTERVAL:" + interval+" seconds");
+        if ("TTN".equalsIgnoreCase(provider)) {
+            restClient.sendAsJson(url, authKey, fileLocation);
+        } else if ("REST".equalsIgnoreCase(provider) || provider.isEmpty()) {
+            if(null==deviceEUI){
+                restClient.printHelp(options);
+                System.exit(2);
+            }
+            System.out.println("INTERVAL:" + interval + " seconds");
+            restClient.sendAsGeneric(url, authKey, deviceEUI, fileLocation, interval);
+
+        } else {
+            System.out.println("Provider name " + provider + " not valid");
+        }
+    }
+
+    private void sendAsGeneric(String url, String authKey, String deviceEUI, String fileLocation, int interval) {
+        //HttpClient client;
 
         FileReader reader = null;
         CSVParser parser = null;
@@ -147,6 +165,26 @@ public class RestClient {
         }
     }
 
+    private void sendAsJson(String url, String authKey,String fileLocation) {
+        File file;
+        FileReader fr;
+        try {
+            file = new File(fileLocation);
+            fr = new FileReader(file);
+
+            BufferedReader br = new BufferedReader(fr);
+            String line;
+            String json = "";
+            while ((line = br.readLine()) != null) {
+                json = json.concat(line);
+            }
+            send(url,authKey,json);
+        } catch (IOException ex) {
+            ex.printStackTrace();
+            System.exit(7);
+        }
+    }
+
     private String[] getHeaders(String line) {
         String l = line;
         while (l.startsWith("#")) {
@@ -189,6 +227,9 @@ public class RestClient {
             }
             if (statusCode == 200 || statusCode == 201) {
                 System.out.println(lineNumber + " OK : " + statusCode);
+                if (!result.toString().isEmpty()) {
+                    System.out.println(result.toString());
+                }
             } else {
                 System.out.println(lineNumber + " ERROR : " + statusCode);
                 System.out.println(result.toString());
@@ -196,6 +237,47 @@ public class RestClient {
         } catch (java.text.ParseException ex) {
             Logger.getLogger(RestClient.class.getName()).log(Level.SEVERE, null, ex);
             System.exit(4);
+        } catch (UnsupportedEncodingException ex) {
+            Logger.getLogger(RestClient.class.getName()).log(Level.SEVERE, null, ex);
+            System.exit(4);
+        } catch (IOException ex) {
+            Logger.getLogger(RestClient.class.getName()).log(Level.SEVERE, null, ex);
+            System.exit(5);
+        }
+    }
+    
+    private void send(String url, String authKey, String json) {
+        String apiPath = "api/ttn";
+        if (!url.endsWith("/")) {
+            apiPath = "/" + apiPath;
+        }
+        HttpClient client = HttpClientBuilder.create().build();
+        HttpPost post = new HttpPost(url + apiPath);
+        // add header
+        post.setHeader("User-Agent", USER_AGENT);
+        post.setHeader("Authorization", authKey);
+        HttpResponse response;
+
+        try {
+            post.setEntity(new StringEntity(json, ContentType.APPLICATION_JSON));
+            response = client.execute(post);
+            int statusCode = response.getStatusLine().getStatusCode();
+            BufferedReader rd = new BufferedReader(
+                    new InputStreamReader(response.getEntity().getContent()));
+            StringBuilder result = new StringBuilder();
+            String line;
+            while ((line = rd.readLine()) != null) {
+                result.append(line);
+            }
+            if (statusCode == 200 || statusCode == 201) {
+                System.out.println("OK : " + statusCode);
+                if (!result.toString().isEmpty()) {
+                    System.out.println(result.toString());
+                }
+            } else {
+                System.out.println("ERROR : " + statusCode);
+                System.out.println(result.toString());
+            }
         } catch (UnsupportedEncodingException ex) {
             Logger.getLogger(RestClient.class.getName()).log(Level.SEVERE, null, ex);
             System.exit(4);
